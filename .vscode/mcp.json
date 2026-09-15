@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "perplexityComputer": {
+      "type": "http",
+      "url": "https://www.perplexity.ai/rest/computer/mcp"
+    }
+  }
+}
