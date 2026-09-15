@@ -15,7 +15,7 @@ S-DES-encrypted 10~KB file. Functional testing confirmed loss-free round trips
 for all three ciphers: the 1~MB file recovered by the server was byte-identical
 to the original, as was the 10~KB file returned to the client. Measured
 throughput of the educational S-DES implementation was approximately
-0.13~MB/s (7.58~s to encrypt and 7.57~s to decrypt 1~MB), which quantifies the
+0.13~MB/s (7.50~s to encrypt and 7.52~s to decrypt 1~MB), which quantifies the
 cost of a pure-Python, block-at-a-time design. The testing chapter also records
 the limits observed in practice: Caesar offers 25 effective keys, S-DES offers a
 10-bit key space of 1{,}024 keys, encryption is performed in Electronic Codebook
