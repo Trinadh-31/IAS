@@ -1,0 +1,597 @@
+\chapter{Introduction}
+
+\section{Background}
+Confidentiality is the first pillar of the CIA triad and the historical starting
+point of cryptography. Classical ciphers such as Caesar and Playfair illustrate
+substitution and digraph techniques, while Simplified DES (S-DES) is a scaled-down
+teaching version of the Feistel block-cipher structure used by DES and, in spirit,
+by AES. Studying all three inside a single working network application makes the
+transition from paper exercises to real message and file protection concrete: the
+same plaintext must be encoded, framed, transmitted over a socket, received,
+decrypted and verified byte-for-byte.
+
+\section{Problem Statement}
+A plain TCP socket transfers data in cleartext, so any party on the network path
+can read messages and files. The problem addressed by this prototype is therefore:
+\emph{how can a client and a server exchange text messages and bulk binary files
+over TCP such that only the endpoints holding the shared key can read the
+content, while the mechanism itself remains simple enough to inspect and reason
+about?}
+
+\section{Objectives}
+\begin{enumerate}
+  \item Implement Caesar, Playfair and byte-wise S-DES encryption and decryption
+        as a reusable Python module.
+  \item Build a TCP server that accepts an encrypted frame, decrypts it, and
+        displays the ciphertext alongside the recovered plaintext.
+  \item Build an interactive client that lets the user choose the algorithm and
+        key, encrypt either a typed message or a 1~MB binary file, and decrypt the
+        server's reply.
+  \item Verify correctness by comparing the recovered file with the original
+        byte-for-byte, and measure the throughput of the S-DES implementation.
+  \item Analyse the residual security weaknesses of the prototype and recommend
+        defensible alternatives.
+\end{enumerate}
+
+\section{Scope and Assumptions}
+The prototype is an educational artefact. The shared key is agreed out of band
+(the user types it into both endpoints) and is carried inside the frame header for
+convenience; no key exchange, certificate validation, integrity check or replay
+protection is implemented. S-DES operates one byte at a time in Electronic
+Codebook (ECB) mode. Caesar and Playfair operate on text only, and Playfair
+additionally discards non-alphabetic characters. Testing was carried out on the
+loopback interface with one client connection at a time, because the server
+handles connections sequentially.
+
+\section{Development Environment}
+\begin{table}[!ht]
+\centering
+\caption{Prototype implementation and test environment}
+\label{tab:env}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Item} & \textbf{Value} \\ \hline
+Language & Python 3.14.3 (standard library only) \\ \hline
+Modules used & \texttt{socket}, \texttt{json}, \texttt{os}, \texttt{math} \\ \hline
+Transport & TCP, stream sockets (\texttt{AF\_INET}, \texttt{SOCK\_STREAM}) \\ \hline
+Server bind address & \texttt{0.0.0.0}, port \texttt{9000} \\ \hline
+Client target & \texttt{127.0.0.1}, port \texttt{9000} \\ \hline
+Ciphers & Caesar, Playfair, S-DES (byte-wise, ECB) \\ \hline
+Test data & \texttt{sample\_1mb.bin} (1{,}048{,}576 B), \texttt{sample\_10kb.bin} (10{,}240 B) \\ \hline
+Source repository & \url{https://github.com/Trinadh-31/IAS} \\ \hline
+\end{tabular}
+\end{table}
+
+\chapter{System Design}
+
+\section{Architecture Overview}
+The prototype follows a three-layer split: a cipher library, two network
+endpoints, and a sample-data generator. Both endpoints import the same cipher
+functions, so encryption and decryption are guaranteed to be symmetric.
+Figure~\ref{fig:arch} shows the arrangement and the direction of data flow.
+
+\begin{figure}[!ht]
+    \centering
+    \begin{tikzpicture}[
+        font=\small,
+        node distance=6mm,
+        mod/.style={draw=blue!55!black, fill=blue!5, rounded corners=2pt,
+                    align=center, inner sep=5pt, minimum height=20mm, text width=32mm},
+        lib/.style={mod, draw=orange!65!black, fill=orange!8, minimum height=16mm, text width=33mm},
+        dat/.style={mod, draw=green!45!black, fill=green!6, minimum height=12mm, text width=34mm},
+        arr/.style={-{Latex[length=2mm]}, blue!55!black, thick},
+        darr/.style={-{Latex[length=2mm]}, gray, dashed}
+    ]
+    \node[mod] (cli) at (0,0) {\textbf{client.py}\\[2pt]\scriptsize Interactive CLI\\ \scriptsize selects algorithm + key\\ \scriptsize encrypts and frames data};
+    \node[mod] (srv) at (8.4,0) {\textbf{server.py}\\[2pt]\scriptsize TCP listener :9000\\ \scriptsize parses frame, decrypts\\ \scriptsize prints and replies};
+    \node[lib] (lib) at (4.2,2.3) {\textbf{ciphers.py}\\[2pt]\scriptsize caesar / playfair / sdes\\ \scriptsize encrypt and decrypt};
+    \node[dat] (dat) at (4.2,-2.4) {\textbf{Sample data}\\[2pt]\scriptsize sample\_1mb.bin\\ \scriptsize sample\_10kb.bin};
+
+    \draw[arr] (cli.north) -- node[above left=-1mm and -2mm]{\scriptsize import} (lib.west);
+    \draw[arr] (srv.north) -- node[above right=-1mm and -2mm]{\scriptsize import} (lib.east);
+    \draw[arr] ([yshift=3mm]cli.east) -- node[above]{\scriptsize encrypted request} ([yshift=3mm]srv.west);
+    \draw[arr] ([yshift=-4mm]srv.west) -- node[below]{\scriptsize encrypted reply} ([yshift=-4mm]cli.east);
+    \draw[darr] (dat.west) -- (cli.south);
+    \draw[darr] (dat.east) -- (srv.south);
+    \end{tikzpicture}
+    \caption{Component architecture of the client--server cipher prototype; both endpoints share one cipher module and communicate over a TCP socket on port 9000.}
+    \label{fig:arch}
+\end{figure}
+
+\section{Module Responsibilities}
+Table~\ref{tab:modules} lists each source file and the responsibility it owns.
+Keeping the ciphers in one module avoids duplicated key-schedule logic and makes
+the algorithms independently testable.
+
+\begin{table}[!ht]
+\centering
+\caption{Source files and their responsibilities}
+\label{tab:modules}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{File} & \textbf{Responsibility} \\ \hline
+\texttt{ciphers.py} & Caesar, Playfair and S-DES primitives; self-test in \texttt{\_\_main\_\_} \\ \hline
+\texttt{server.py} & Listener, frame parsing, decryption, display, encrypted reply \\ \hline
+\texttt{client.py} & Menu-driven UI, key entry, encryption, framing, reply handling \\ \hline
+\texttt{make\_files.py} & Generates the 1~MB and 10~KB random sample files \\ \hline
+\end{tabular}
+\end{table}
+
+\section{Message Frame Format}
+Because TCP is a byte stream and not a message-oriented protocol, the prototype
+defines its own application-layer framing, shown in Figure~\ref{fig:frame}. A
+four-byte big-endian length prefix tells the peer how many bytes of JSON header
+follow; the header in turn declares \texttt{payload\_size}, so the receiver knows
+exactly how many ciphertext bytes to read. The helper \texttt{recv\_all()} loops
+until the requested number of bytes has arrived, which prevents the short-read
+bug that naive \texttt{recv()} calls suffer on large transfers.
+
+\begin{figure}[!ht]
+    \centering
+    \begin{tikzpicture}[font=\small,
+        fld/.style={draw=blue!55!black, align=center, minimum height=14mm, inner sep=4pt}]
+    \node[fld, fill=blue!8, text width=20mm] (a) at (0,0) {\textbf{Header}\\ \textbf{length}\\[2pt]\scriptsize 4 bytes\\ \scriptsize big-endian};
+    \node[fld, fill=orange!10, text width=45mm, right=0.6mm of a] (b) {\textbf{JSON header}\\[2pt]\scriptsize mode, algorithm, key,\\ \scriptsize filename, payload\_size};
+    \node[fld, fill=green!8, text width=38mm, right=0.6mm of b] (c) {\textbf{Payload}\\[2pt]\scriptsize ciphertext bytes\\ \scriptsize (message or file)};
+    \draw[{Latex[length=2mm]}-{Latex[length=2mm]}, gray] ([yshift=-3mm]a.south west) -- ([yshift=-3mm]c.south east);
+    \node[gray, below=6mm of b.south, text width=0.95\linewidth, align=center]
+        {\scriptsize read in order by \texttt{recv\_all()}: 4 bytes, then \texttt{hdr\_len} bytes, then \texttt{payload\_size} bytes};
+    \end{tikzpicture}
+    \caption{Application-layer frame: four-byte length prefix, JSON header and ciphertext payload.}
+    \label{fig:frame}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Fields carried in the JSON header}
+\label{tab:header}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Field} & \textbf{Example} & \textbf{Purpose} \\ \hline
+\texttt{mode} & \texttt{message} / \texttt{file} & Selects the receiver's handling path \\ \hline
+\texttt{algorithm} & \texttt{caesar} / \texttt{playfair} / \texttt{sdes} & Selects the decryption routine \\ \hline
+\texttt{key} & \texttt{3} / \texttt{SECURE} / \texttt{1010000010} & Shared key for that algorithm \\ \hline
+\texttt{filename} & \texttt{sample\_1mb.bin} & Output name for file mode \\ \hline
+\texttt{payload\_size} & \texttt{1048576} & Exact ciphertext length in bytes \\ \hline
+\end{tabular}
+\end{table}
+
+\section{Control Flow}
+The client presents a menu with three actions: send a message, send the 1~MB file
+using S-DES, or quit. For a message the user picks one of the three algorithms and
+supplies the matching key; the client prints the ciphertext, opens a fresh
+connection, transmits the frame and waits for the reply. The server runs an
+accept loop: for every connection it reads one frame, decrypts it, prints both
+representations, and then responds. For Caesar and Playfair the response is an
+encrypted acknowledgement string; for S-DES the response is an encrypted 10~KB
+file, which exercises the bulk path in the opposite direction.
+
+\chapter{Cryptographic Algorithms}
+
+\section{Caesar Cipher}
+The Caesar cipher shifts every alphabetic character by a fixed integer, wrapping
+within its case and leaving digits, spaces and punctuation untouched. Decryption
+reuses the encryption routine with the additive inverse of the shift,
+$(-k) \bmod 26$, which halves the code that has to be trusted.
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\KwIn{plaintext $P$, shift $k$}
+\KwOut{ciphertext $C$}
+$C \leftarrow \varepsilon$\;
+\ForEach{character $c \in P$}{
+  \uIf{$c$ is lowercase}{
+    append $\mathrm{chr}((\mathrm{ord}(c)-\mathrm{ord}(\text{`a'})+k) \bmod 26 + \mathrm{ord}(\text{`a'}))$ to $C$\;
+  }
+  \uElseIf{$c$ is uppercase}{
+    append $\mathrm{chr}((\mathrm{ord}(c)-\mathrm{ord}(\text{`A'})+k) \bmod 26 + \mathrm{ord}(\text{`A'}))$ to $C$\;
+  }
+  \Else{
+    append $c$ unchanged to $C$\;
+  }
+}
+\Return $C$\;
+\caption{Caesar encryption as implemented in \texttt{encrypt\_caesar()}}
+\end{algorithm}
+
+\section{Playfair Cipher}
+Playfair encrypts digraphs using a $5 \times 5$ key matrix. The implementation
+normalises the text to uppercase letters, maps \texttt{J} to \texttt{I}, inserts
+\texttt{X} between repeated letters of a pair, and pads an odd-length string with a
+trailing \texttt{X}. Three substitution rules then apply to each pair: same row
+shifts right, same column shifts down, otherwise the letters are replaced by the
+opposite corners of the rectangle they define.
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\KwIn{plaintext $P$, keyword $K$}
+\KwOut{ciphertext $C$}
+$T \leftarrow$ normalise and digraph-pad $P$ (uppercase, $J \rightarrow I$, insert $X$)\;
+$M \leftarrow$ $5\times5$ matrix from unique letters of $K$, then remaining alphabet without $J$\;
+\For{$i \leftarrow 0$ \KwTo $|T|-1$ \textbf{step} $2$}{
+  $(r_a,c_a) \leftarrow \mathrm{pos}(T_i)$; \quad $(r_b,c_b) \leftarrow \mathrm{pos}(T_{i+1})$\;
+  \uIf{$r_a = r_b$}{
+    append $M[r_a][(c_a{+}1) \bmod 5]$ and $M[r_b][(c_b{+}1) \bmod 5]$\;
+  }
+  \uElseIf{$c_a = c_b$}{
+    append $M[(r_a{+}1) \bmod 5][c_a]$ and $M[(r_b{+}1) \bmod 5][c_b]$\;
+  }
+  \Else{
+    append $M[r_a][c_b]$ and $M[r_b][c_a]$\;
+  }
+}
+\Return $C$\;
+\caption{Playfair encryption as implemented in \texttt{encrypt\_playfair()}}
+\end{algorithm}
+
+\section{Simplified DES}
+S-DES is a two-round Feistel cipher with an 8-bit block and a 10-bit key. The key
+schedule permutes the key with P10, splits it into two halves, and applies
+circular left shifts of one and two positions before compressing each result with
+P8 to produce subkeys $K_1$ and $K_2$. Each round applies the function $f_K$:
+expand/permute the right half with EP, XOR with the subkey, substitute through
+S-boxes $S_0$ and $S_1$, permute with P4, and XOR into the left half. The block is
+swapped between rounds, and the inverse initial permutation ends the process.
+Decryption is identical with the subkeys applied in reverse order.
+
+\begin{table}[!ht]
+\centering
+\caption{Permutation tables used by the S-DES implementation}
+\label{tab:sdes}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Table} & \textbf{Values} \\ \hline
+P10 & 3, 5, 2, 7, 4, 10, 1, 9, 8, 6 \\ \hline
+P8 & 6, 3, 7, 4, 8, 5, 10, 9 \\ \hline
+IP & 2, 6, 3, 1, 4, 8, 5, 7 \\ \hline
+IP$^{-1}$ & 4, 1, 3, 5, 7, 2, 8, 6 \\ \hline
+EP & 4, 1, 2, 3, 2, 3, 4, 1 \\ \hline
+P4 & 2, 4, 3, 1 \\ \hline
+\end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\KwIn{plaintext byte $b$, 10-bit key $K$}
+\KwOut{ciphertext byte $b'$}
+$(K_1,K_2) \leftarrow$ \texttt{generate\_subkeys}$(K)$ \tcp*{P10, shifts, P8}
+$x \leftarrow \mathrm{IP}(\mathrm{bits}(b))$\;
+$x \leftarrow f_K(x, K_1)$ \tcp*{EP, XOR, $S_0/S_1$, P4}
+$x \leftarrow \mathrm{swap}(x)$ \tcp*{exchange 4-bit halves}
+$x \leftarrow f_K(x, K_2)$\;
+$b' \leftarrow \mathrm{byte}(\mathrm{IP}^{-1}(x))$\;
+\Return $b'$\;
+\caption{S-DES single-block encryption (\texttt{sdes\_encrypt\_block()})}
+\end{algorithm}
+
+\section{Key Material}
+Table~\ref{tab:keys} summarises the key formats and the size of the resulting
+search space, which is the basis of the security discussion in
+Chapter~\ref{ch:security}.
+
+\begin{table}[!ht]
+\centering
+\caption{Key formats and effective key space per algorithm}
+\label{tab:keys}
+\begin{tabular}{|l|l|p{6.0cm}|}
+\hline
+\textbf{Algorithm} & \textbf{Key format} & \textbf{Effective key space} \\ \hline
+Caesar & integer shift, e.g.\ \texttt{3} & 25 useful keys \\ \hline
+Playfair & keyword, e.g.\ \texttt{SECURE} & $25! \approx 1.55\times10^{25}$ matrices, far fewer in practice \\ \hline
+S-DES & 10-bit string, e.g.\ \texttt{1010000010} & $2^{10} = 1{,}024$ keys \\ \hline
+\end{tabular}
+\end{table}
+
+\chapter{Implementation}
+
+\section{Cipher Module}
+The cipher module exposes symmetric pairs of functions and a bytes-level wrapper
+for S-DES that iterates over the input one byte at a time. The listing below shows
+the key schedule and the bulk wrapper.
+
+\begin{singlespace}
+\begin{lstlisting}[language=Python, caption=S-DES key schedule and bulk encryption (\texttt{ciphers.py})]
+def _generate_sdes_subkeys(key10):
+    p10 = [3,5,2,7,4,10,1,9,8,6]
+    p8  = [6,3,7,4,8,5,10,9]
+    k = _permute(key10, p10)
+    left, right = k[:5], k[5:]
+    left, right = _left_shift(left,1), _left_shift(right,1)
+    k1 = _permute(left+right, p8)
+    left, right = _left_shift(left,2), _left_shift(right,2)
+    k2 = _permute(left+right, p8)
+    return k1, k2
+
+def sdes_encrypt_bytes(data: bytes, key10: str) -> bytes:
+    if len(key10) != 10:
+        raise ValueError('SDES key must be 10 bits')
+    key_bits = [int(c) for c in key10]
+    out = bytearray()
+    for b in data:
+        out.append(sdes_encrypt_block(b, key_bits))
+    return bytes(out)
+\end{lstlisting}
+\end{singlespace}
+
+\section{Client}
+The client builds the frame and writes it in three ordered sends, then reads the
+reply with the same discipline.
+
+\begin{singlespace}
+\begin{lstlisting}[language=Python, caption=Framing and transmission on the client (\texttt{client.py})]
+def send_header_and_payload(conn, header: dict, payload: bytes):
+    hdr_b = json.dumps(header).encode()
+    conn.send(len(hdr_b).to_bytes(4,'big'))
+    conn.send(hdr_b)
+    if payload:
+        conn.send(payload)
+
+header = {'mode':'message','algorithm':'sdes','key':key,
+          'payload_size':len(payload)}
+\end{lstlisting}
+\end{singlespace}
+
+\section{Server}
+On the server side \texttt{recv\_all()} guarantees complete reads, and the
+handler dispatches on \texttt{mode} and \texttt{algorithm}.
+
+\begin{singlespace}
+\begin{lstlisting}[language=Python, caption=Complete reads and frame parsing on the server (\texttt{server.py})]
+def recv_all(conn, n):
+    buf = b''
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError('socket closed')
+        buf += chunk
+    return buf
+
+hdr_len = int.from_bytes(recv_all(conn, 4), 'big')
+hdr = json.loads(recv_all(conn, hdr_len).decode())
+payload = recv_all(conn, hdr.get('payload_size', 0))
+\end{lstlisting}
+\end{singlespace}
+
+\section{Bulk File Handling}
+\begin{sloppypar}
+In file mode the client reads \texttt{sample\_1mb.bin}, encrypts the whole buffer
+with S-DES and sends it as a single payload. The server stores the ciphertext as
+\texttt{received\_sample\_1mb.bin}, writes the decrypted result as
+\texttt{decrypted\_sample\_1mb.bin}, and then encrypts and returns
+\texttt{sample\_10kb.bin}. The client decrypts that response into
+\texttt{server\_sent\_sample\_10kb.bin}. This produces four artefacts that can be
+compared with the originals to prove that no bytes were lost or altered.
+\end{sloppypar}
+
+\section{Execution Procedure}
+\begin{singlespace}
+\begin{lstlisting}[language=bash, caption=Running the prototype]
+python make_files.py     # generate sample_1mb.bin and sample_10kb.bin
+python server.py         # terminal 1: listener on port 9000
+python client.py         # terminal 2: interactive menu
+# SDES key must be exactly 10 bits, e.g. 1010000010
+\end{lstlisting}
+\end{singlespace}
+
+\chapter{Testing and Results}
+
+\section{Methodology}
+Each cipher was exercised in message mode, and S-DES was additionally exercised in
+file mode with the 1~MB sample. Correctness was judged on two criteria: the
+plaintext printed by the receiver had to match what was sent, and the decrypted
+file on disk had to be byte-identical to the source file. Timings were taken
+around the bulk encryption and decryption calls on the same machine that hosted
+both endpoints.
+
+\section{Functional Test Cases}
+Table~\ref{tab:tests} lists the executed cases with the values actually observed
+in the terminals.
+
+\begin{table}[!ht]
+\centering
+\caption{Functional test cases and observed results}
+\label{tab:tests}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|l|l|l|l|}
+\hline
+\textbf{\#} & \textbf{Case} & \textbf{Key} & \textbf{Observed output} & \textbf{Result} \\ \hline
+1 & Caesar message & 3 & \texttt{Lqirupdwlrq Dvvxudqfh dqg Vhfxulwb} & Pass \\ \hline
+2 & Caesar reply decrypt & 3 & \texttt{Server reply: received your message} & Pass \\ \hline
+3 & Playfair message & \texttt{SECURE} & \texttt{ISKYIQEWUMKC} & Pass \\ \hline
+4 & Playfair reply decrypt & \texttt{SECURE} & \texttt{SERVERREPLYRECEIVEDYOURMESSAGE} & Pass \\ \hline
+5 & S-DES message \texttt{HELLO} & \texttt{1010000010} & ciphertext \texttt{e050a5a547}, server printed \texttt{b'HELLO'} & Pass \\ \hline
+6 & S-DES 1~MB file transfer & \texttt{1010000010} & \texttt{decrypted\_sample\_1mb.bin} identical, 1{,}048{,}576 B & Pass \\ \hline
+7 & S-DES 10~KB reply file & \texttt{1010000010} & \texttt{server\_sent\_sample\_10kb.bin} identical, 10{,}240 B & Pass \\ \hline
+8 & Playfair round trip of \texttt{HELLO WORLD} & \texttt{SECURE} & recovered \texttt{HELXLOWORLDX} & Partial \\ \hline
+9 & Invalid S-DES key length & \texttt{101} & \texttt{ValueError: SDES key must be 10 bits} & Pass \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\section{Console Transcripts}
+The following transcript was captured on the server while the Caesar and S-DES
+message tests ran.
+
+\begin{singlespace}
+\begin{lstlisting}[caption=Server output during message tests]
+Starting server on 0.0.0.0 9000
+Client connected ('127.0.0.1', 55270)
+Received mode=message algorithm=caesar key=3 size=34
+Ciphertext (client->server): Lqirupdwlrq Dvvxudqfh dqg Vhfxulwb
+Decrypted plaintext: Information Assurance and Security
+Sent reply ciphertext and plaintext shown above (server side)
+Client connected ('127.0.0.1', 46710)
+Received mode=message algorithm=sdes key=1010000010 size=5
+Received SDES ciphertext (hex, first 200 bytes): e050a5a547
+Decrypted plaintext (first 200 bytes): b'HELLO'
+Server will send SDES-encrypted 10KB file back to client
+Sent encrypted 10KB file to client
+\end{lstlisting}
+\end{singlespace}
+
+\begin{singlespace}
+\begin{lstlisting}[caption=Client output during the 1~MB S-DES file transfer]
+Enter 10-bit SDES key to use: 1010000010
+Encrypted 1MB file preview (hex, first 200 bytes): d7207a0cefabd6c927ac9d5b...
+Received file header from server: {'mode': 'file', 'algorithm': 'sdes',
+ 'key': '1010000010', 'filename': 'sample_10kb.bin', 'payload_size': 10240}
+Saved decrypted file from server to server_sent_sample_10kb.bin
+\end{lstlisting}
+\end{singlespace}
+
+\section{Performance}
+Table~\ref{tab:perf} reports the measured cost of the byte-wise S-DES
+implementation. The throughput of roughly 0.13~MB/s is a direct consequence of
+processing eight bits per Python function call; a table-driven or block-based
+implementation, or a call into a compiled library, would raise this by orders of
+magnitude. Caesar and Playfair were applied only to short messages, where the cost
+was not measurable at this resolution.
+
+\begin{table}[!ht]
+\centering
+\caption{Measured S-DES performance on the test machine}
+\label{tab:perf}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{Payload} & \textbf{Encrypt} & \textbf{Decrypt} & \textbf{Throughput} \\ \hline
+1~MB (1{,}048{,}576 B) & 7.58~s & 7.57~s & $\approx$ 0.13~MB/s \\ \hline
+10~KB (10{,}240 B) & 0.073~s & 0.073~s & $\approx$ 0.13~MB/s \\ \hline
+5~B message (\texttt{HELLO}) & $<$ 0.001~s & $<$ 0.001~s & not measurable \\ \hline
+\end{tabular}
+\end{table}
+
+\section{Observations and Known Defects}
+\begin{enumerate}
+  \item \textbf{Playfair is not loss-free.} Because the preparation step strips
+        spaces and inserts filler letters, \texttt{HELLO WORLD} decrypts to
+        \texttt{HELXLOWORLDX}. This is inherent to Playfair, but it means the
+        cipher cannot be used for binary or exact-text payloads.
+  \item \textbf{Asymmetric reply in S-DES message mode.} When a message is sent
+        with S-DES the server answers with a \texttt{file} frame, while the client
+        only prints \texttt{Server sent a file back; use receive logic}. The reply
+        path for that combination is unfinished.
+  \item \textbf{Key echoed in the header.} Every frame carries the key in
+        cleartext, so an observer on the path recovers the plaintext trivially.
+  \item \textbf{Single-threaded server.} Connections are handled one at a time, so
+        a long 1~MB transfer blocks all other clients.
+  \item \textbf{No padding or ECB alternative.} S-DES encrypts each byte
+        independently, so repeated bytes are visible in the ciphertext.
+\end{enumerate}
+
+\chapter{Security Analysis}
+\label{ch:security}
+
+\section{Threat Model}
+The assumed adversary is a passive or active attacker on the network path between
+client and server who can capture, replay or modify frames but does not control
+either endpoint. Against this adversary the prototype is expected to protect
+confidentiality; it makes no claim about integrity or availability.
+
+\section{Identified Weaknesses}
+\begin{enumerate}
+  \item \textbf{Trivial key spaces.} Caesar has 25 useful keys and S-DES has
+        $2^{10}=1{,}024$; both are exhaustively searchable in microseconds. A
+        brute-force script that decrypts one captured block under every candidate
+        key recovers the plaintext immediately.
+  \item \textbf{ECB mode.} S-DES is applied byte-by-byte with no chaining and no
+        initialisation vector, so identical plaintext bytes always map to identical
+        ciphertext bytes. Frequency analysis over an 8-bit block size therefore
+        leaks the structure of the payload.
+  \item \textbf{Key transported with the ciphertext.} The JSON header contains the
+        key in cleartext, which defeats the encryption entirely for any observer of
+        the channel. This is the single most serious defect.
+  \item \textbf{No integrity or authentication.} Without a MAC or digital
+        signature, an attacker can flip ciphertext bytes and the receiver will
+        accept the corrupted plaintext; there is also no way to tell whether the
+        peer is the legitimate server.
+  \item \textbf{No replay protection.} Frames carry no nonce, sequence number or
+        timestamp, so a captured frame can be replayed indefinitely.
+  \item \textbf{Statistical weakness of classical ciphers.} Caesar preserves
+        letter frequency, and Playfair preserves digraph frequency, so both fall to
+        classical cryptanalysis on modest amounts of ciphertext.
+\end{enumerate}
+
+\section{Recommended Hardening}
+Table~\ref{tab:harden} maps each weakness to the accepted modern remedy.
+
+\begin{table}[!ht]
+\centering
+\caption{Weaknesses mapped to recommended mitigations}
+\label{tab:harden}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Weakness} & \textbf{Recommended mitigation} \\ \hline
+Small key space & AES-128/256 or another cipher with a 128-bit or larger key \\ \hline
+ECB mode & Authenticated mode such as AES-GCM or ChaCha20-Poly1305 with a random nonce \\ \hline
+Key in header & Diffie--Hellman key agreement, or run the protocol inside TLS \\ \hline
+No integrity & HMAC-SHA256 over header and ciphertext, verified before decryption \\ \hline
+No replay protection & Monotonic sequence numbers plus per-session nonces \\ \hline
+Weak passphrase keys & Key derivation with PBKDF2, scrypt or Argon2 and a random salt \\ \hline
+Single-threaded server & Thread or asyncio per connection, with per-connection limits \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\section{Mapping to the CIA Triad}
+\begin{table}[!ht]
+\centering
+\caption{Security properties achieved by the prototype}
+\label{tab:cia}
+\begin{tabular}{|l|l|p{6.5cm}|}
+\hline
+\textbf{Property} & \textbf{Status} & \textbf{Reason} \\ \hline
+Confidentiality & Partial & Obfuscation only; key spaces are searchable and the key is sent in the clear \\ \hline
+Integrity & Not provided & No MAC, checksum or signature over the frame \\ \hline
+Availability & Not addressed & Single-threaded server, no rate limiting or timeouts \\ \hline
+Authentication & Not provided & Neither endpoint proves its identity \\ \hline
+Non-repudiation & Not provided & No signatures or audit log of exchanges \\ \hline
+\end{tabular}
+\end{table}
+
+\chapter{Conclusion and Future Work}
+
+\section{Conclusion}
+The prototype meets every functional objective. Three ciphers of increasing
+complexity were implemented in a single reusable module, wrapped in a documented
+application-layer frame, and exercised across a TCP connection in both message and
+bulk-file modes. Correctness was demonstrated rather than assumed: the 1~MB file
+decrypted on the server and the 10~KB file decrypted on the client were both
+byte-identical to their sources. The measured S-DES throughput of about
+0.13~MB/s quantifies the price of a purely educational implementation. Equally
+important, the exercise made the limits of the design explicit: obfuscation is
+not confidentiality, and a cipher without key management, integrity protection and
+a sound mode of operation provides no meaningful defence.
+
+\section{Future Work}
+\begin{enumerate}
+  \item Replace S-DES with AES-GCM from a vetted library and remove the key from
+        the header in favour of an ephemeral Diffie--Hellman exchange.
+  \item Add HMAC-SHA256 verification and per-frame sequence numbers.
+  \item Complete the S-DES message-mode reply path on the client.
+  \item Stream large files in fixed-size chunks instead of buffering an entire
+        1~MB payload in memory.
+  \item Serve connections concurrently and add read timeouts and size limits.
+  \item Add an automated test suite that asserts round-trip equality and rejects
+        malformed headers and keys.
+\end{enumerate}
+
+\chapter*{References}
+\addcontentsline{toc}{chapter}{References}
+\begin{enumerate}
+  \item Project source repository, \emph{IAS client--server cipher prototype}.
+        \url{https://github.com/Trinadh-31/IAS}
+  \item W. Stallings, \emph{Cryptography and Network Security: Principles and
+        Practice}, Appendix on Simplified DES. \url{https://williamstallings.com/Cryptography/}
+  \item National Institute of Standards and Technology, \emph{FIPS 197: Advanced
+        Encryption Standard (AES)}. \url{https://csrc.nist.gov/pubs/fips/197/final}
+  \item National Institute of Standards and Technology, \emph{SP 800-38D:
+        Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode
+        (GCM) and GMAC}. \url{https://csrc.nist.gov/pubs/sp/800/38/d/final}
+  \item Python Software Foundation, \emph{socket --- Low-level networking
+        interface}. \url{https://docs.python.org/3/library/socket.html}
+  \item Python Software Foundation, \emph{json --- JSON encoder and decoder}.
+        \url{https://docs.python.org/3/library/json.html}
+  \item E. Rescorla, \emph{RFC 8446: The Transport Layer Security (TLS) Protocol
+        Version 1.3}. \url{https://www.rfc-editor.org/rfc/rfc8446}
+\end{enumerate}

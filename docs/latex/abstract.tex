@@ -1,0 +1,28 @@
+This report documents the design, implementation and evaluation of a prototype
+client--server application that provides application-layer confidentiality for
+messages and bulk files using three ciphers of increasing sophistication: the
+Caesar substitution cipher, the Playfair digraph cipher and a byte-wise
+Simplified Data Encryption Standard (S-DES). The prototype is written in Python
+and consists of four components: a reusable cryptographic module
+(\texttt{ciphers.py}), a TCP server (\texttt{server.py}), an interactive TCP
+client (\texttt{client.py}) and a sample-data generator
+(\texttt{make\_files.py}). The client encrypts user input or a 1~MB binary file,
+prefixes it with a four-byte length field and a JSON header describing the mode,
+algorithm and key, and transmits the frame over a TCP socket to the server on
+port~9000. The server reconstructs the frame, decrypts the payload, displays both
+ciphertext and recovered plaintext, and answers with an encrypted reply or an
+S-DES-encrypted 10~KB file. Functional testing confirmed loss-free round trips
+for all three ciphers: the 1~MB file recovered by the server was byte-identical
+to the original, as was the 10~KB file returned to the client. Measured
+throughput of the educational S-DES implementation was approximately
+0.13~MB/s (7.58~s to encrypt and 7.57~s to decrypt 1~MB), which quantifies the
+cost of a pure-Python, block-at-a-time design. The security analysis shows that
+the prototype achieves only obfuscation, not real confidentiality: Caesar offers
+25 effective keys, S-DES offers a 10-bit key space of 1{,}024 keys, encryption is
+performed in Electronic Codebook mode so identical plaintext bytes produce
+identical ciphertext bytes, no integrity or authentication mechanism is present,
+and the session key travels in cleartext inside the JSON header. The report
+concludes with concrete hardening recommendations---authenticated encryption
+with AES-GCM, HMAC-based integrity, a Diffie--Hellman or TLS-based key exchange,
+and randomised initialisation vectors---that would move the prototype from a
+teaching artefact towards a defensible secure-channel implementation.
